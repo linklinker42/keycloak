@@ -55,11 +55,18 @@ public class WebBrowserSsoAuthenticationHandler extends AbstractSamlAuthenticati
 
     @Override
     protected AuthOutcome handleRequest() {
-        boolean globalLogout = "true".equals(facade.getRequest().getQueryParamValue("GLO"));
-
-        if (globalLogout) {
+        final String contextPath = facade.getRequest().getRelativePath();
+        String logoutPath = System.getenv("keycloak_global_logout_path");
+        logoutPath = null == logoutPath ? "/logout" : logoutPath;
+        if (!logoutPath.trim().isEmpty()
+          && contextPath.equalsIgnoreCase(logoutPath)) {
             return globalLogout();
         }
+        boolean globalLogout = "true".equals(facade.getRequest().getQueryParamValue("GLO"));
+
+//        if (globalLogout) {
+//            return globalLogout();
+//        }
 
         return AuthOutcome.AUTHENTICATED;
     }
