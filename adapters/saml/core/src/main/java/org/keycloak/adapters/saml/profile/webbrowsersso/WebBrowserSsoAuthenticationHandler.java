@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.keycloak.adapters.saml.profile.webbrowsersso;
 
 import org.keycloak.adapters.saml.OnSessionCreated;
@@ -38,98 +37,108 @@ import org.keycloak.saml.common.constants.GeneralConstants;
  */
 public class WebBrowserSsoAuthenticationHandler extends AbstractSamlAuthenticationHandler {
 
-    public static SamlAuthenticationHandler create(HttpFacade facade, SamlDeployment deployment, SamlSessionStore sessionStore) {
-        return new WebBrowserSsoAuthenticationHandler(facade, deployment, sessionStore);
+  public static SamlAuthenticationHandler create(HttpFacade facade,
+      SamlDeployment deployment, SamlSessionStore sessionStore) {
+    return new WebBrowserSsoAuthenticationHandler(facade, deployment, sessionStore);
+  }
+
+  WebBrowserSsoAuthenticationHandler(HttpFacade facade,
+      SamlDeployment deployment, SamlSessionStore sessionStore) {
+    super(facade, deployment, sessionStore);
+  }
+
+  @Override
+  public AuthOutcome handle(OnSessionCreated onCreateSession) {
+    return doHandle(new SamlInvocationContext(facade.getRequest().getFirstParam(GeneralConstants.SAML_REQUEST_KEY),
+        facade.getRequest().getFirstParam(GeneralConstants.SAML_RESPONSE_KEY),
+        facade.getRequest().getFirstParam(GeneralConstants.RELAY_STATE)), onCreateSession);
+  }
+
+  @Override
+  protected AuthOutcome handleRequest() {
+    final String contextPath = facade.getRequest().getRelativePath();
+    String logoutPath = System.getenv("keycloak_global_logout_path");
+    logoutPath = null == logoutPath ? "/logout" : logoutPath;
+    if (!logoutPath.trim().isEmpty()
+        && contextPath.equalsIgnoreCase(logoutPath)) {
+      return globalLogout();
     }
 
-    WebBrowserSsoAuthenticationHandler(HttpFacade facade, SamlDeployment deployment, SamlSessionStore sessionStore) {
-        super(facade, deployment, sessionStore);
+//    boolean globalLogout = "true".equals(facade.getRequest().getQueryParamValue("global_logout"));
+//    if (globalLogout) {
+//      return globalLogout();
+//    }
+    return AuthOutcome.AUTHENTICATED;
+  }
+
+  @Override
+  protected AuthOutcome logoutRequest(LogoutRequestType request,
+      String relayState) {
+    if (request.getSessionIndex() == null || request.getSessionIndex().isEmpty()) {
+      sessionStore.logoutByPrincipal(request.getNameID().getValue());
+    } else {
+      sessionStore.logoutBySsoId(request.getSessionIndex());
     }
 
-    @Override
-    public AuthOutcome handle(OnSessionCreated onCreateSession) {
-        return doHandle(new SamlInvocationContext(facade.getRequest().getFirstParam(GeneralConstants.SAML_REQUEST_KEY),
-                facade.getRequest().getFirstParam(GeneralConstants.SAML_RESPONSE_KEY),
-                facade.getRequest().getFirstParam(GeneralConstants.RELAY_STATE)), onCreateSession);
+    String issuerURL = deployment.getEntityID();
+    SAML2LogoutResponseBuilder builder = new SAML2LogoutResponseBuilder();
+    builder.logoutRequestID(request.getID());
+    builder.destination(deployment.getIDP().getSingleLogoutService().getResponseBindingUrl());
+    builder.issuer(issuerURL);
+    BaseSAML2BindingBuilder binding = new BaseSAML2BindingBuilder().relayState(relayState);
+    if (deployment.getIDP().getSingleLogoutService().signResponse()) {
+      if (deployment.getSignatureCanonicalizationMethod() != null) {
+        binding.canonicalizationMethod(deployment.getSignatureCanonicalizationMethod());
+      }
+      binding.signatureAlgorithm(deployment.getSignatureAlgorithm())
+          .signWith(null, deployment.getSigningKeyPair())
+          .signDocument();
+      // TODO: As part of KEYCLOAK-3810, add KeyID to the SAML document
+      //   <related DocumentBuilder>.addExtension(new KeycloakKeySamlExtensionGenerator(<key ID>));
     }
 
-    @Override
-    protected AuthOutcome handleRequest() {
-        boolean globalLogout = "true".equals(facade.getRequest().getQueryParamValue("GLO"));
+    try {
+      SamlUtil.sendSaml(false, facade, deployment.getIDP().getSingleLogoutService().getResponseBindingUrl(), binding, builder.buildDocument(),
+          deployment.getIDP().getSingleLogoutService().getResponseBinding());
+    } catch (Exception e) {
+      log.error("Could not send logout response SAML request", e);
+      return AuthOutcome.FAILED;
+    }
+    return AuthOutcome.NOT_ATTEMPTED;
+  }
 
-        if (globalLogout) {
-            return globalLogout();
-        }
-
-        return AuthOutcome.AUTHENTICATED;
+  private AuthOutcome globalLogout() {
+    SamlSession account = sessionStore.getAccount();
+    if (account == null) {
+      return AuthOutcome.NOT_ATTEMPTED;
+    }
+    SAML2LogoutRequestBuilder logoutBuilder = new SAML2LogoutRequestBuilder()
+        .assertionExpiration(30)
+        .issuer(deployment.getEntityID())
+        .sessionIndex(account.getSessionIndex())
+        .nameId(account.getPrincipal().getNameID())
+        .destination(deployment.getIDP().getSingleLogoutService().getRequestBindingUrl());
+    BaseSAML2BindingBuilder binding = new BaseSAML2BindingBuilder();
+    if (deployment.getIDP().getSingleLogoutService().signRequest()) {
+      if (deployment.getSignatureCanonicalizationMethod() != null) {
+        binding.canonicalizationMethod(deployment.getSignatureCanonicalizationMethod());
+      }
+      binding.signatureAlgorithm(deployment.getSignatureAlgorithm());
+      binding.signWith(null, deployment.getSigningKeyPair())
+          .signDocument();
+      // TODO: As part of KEYCLOAK-3810, add KeyID to the SAML document
+      //   <related DocumentBuilder>.addExtension(new KeycloakKeySamlExtensionGenerator(<key ID>));
     }
 
-    @Override
-    protected AuthOutcome logoutRequest(LogoutRequestType request, String relayState) {
-        if (request.getSessionIndex() == null || request.getSessionIndex().isEmpty()) {
-            sessionStore.logoutByPrincipal(request.getNameID().getValue());
-        } else {
-            sessionStore.logoutBySsoId(request.getSessionIndex());
-        }
+    binding.relayState("logout");
 
-        String issuerURL = deployment.getEntityID();
-        SAML2LogoutResponseBuilder builder = new SAML2LogoutResponseBuilder();
-        builder.logoutRequestID(request.getID());
-        builder.destination(deployment.getIDP().getSingleLogoutService().getResponseBindingUrl());
-        builder.issuer(issuerURL);
-        BaseSAML2BindingBuilder binding = new BaseSAML2BindingBuilder().relayState(relayState);
-        if (deployment.getIDP().getSingleLogoutService().signResponse()) {
-            if (deployment.getSignatureCanonicalizationMethod() != null)
-                binding.canonicalizationMethod(deployment.getSignatureCanonicalizationMethod());
-            binding.signatureAlgorithm(deployment.getSignatureAlgorithm())
-                    .signWith(null, deployment.getSigningKeyPair())
-                    .signDocument();
-            // TODO: As part of KEYCLOAK-3810, add KeyID to the SAML document
-            //   <related DocumentBuilder>.addExtension(new KeycloakKeySamlExtensionGenerator(<key ID>));
-        }
-
-
-        try {
-            SamlUtil.sendSaml(false, facade, deployment.getIDP().getSingleLogoutService().getResponseBindingUrl(), binding, builder.buildDocument(),
-                    deployment.getIDP().getSingleLogoutService().getResponseBinding());
-        } catch (Exception e) {
-            log.error("Could not send logout response SAML request", e);
-            return AuthOutcome.FAILED;
-        }
-        return AuthOutcome.NOT_ATTEMPTED;
+    try {
+      SamlUtil.sendSaml(true, facade, deployment.getIDP().getSingleLogoutService().getRequestBindingUrl(), binding, logoutBuilder.buildDocument(), deployment.getIDP().getSingleLogoutService().getRequestBinding());
+      sessionStore.setCurrentAction(SamlSessionStore.CurrentAction.LOGGING_OUT);
+    } catch (Exception e) {
+      log.error("Could not send global logout SAML request", e);
+      return AuthOutcome.FAILED;
     }
-
-    private AuthOutcome globalLogout() {
-        SamlSession account = sessionStore.getAccount();
-        if (account == null) {
-            return AuthOutcome.NOT_ATTEMPTED;
-        }
-        SAML2LogoutRequestBuilder logoutBuilder = new SAML2LogoutRequestBuilder()
-                .assertionExpiration(30)
-                .issuer(deployment.getEntityID())
-                .sessionIndex(account.getSessionIndex())
-                .nameId(account.getPrincipal().getNameID())
-                .destination(deployment.getIDP().getSingleLogoutService().getRequestBindingUrl());
-        BaseSAML2BindingBuilder binding = new BaseSAML2BindingBuilder();
-        if (deployment.getIDP().getSingleLogoutService().signRequest()) {
-            if (deployment.getSignatureCanonicalizationMethod() != null)
-                binding.canonicalizationMethod(deployment.getSignatureCanonicalizationMethod());
-            binding.signatureAlgorithm(deployment.getSignatureAlgorithm());
-            binding.signWith(null, deployment.getSigningKeyPair())
-                    .signDocument();
-            // TODO: As part of KEYCLOAK-3810, add KeyID to the SAML document
-            //   <related DocumentBuilder>.addExtension(new KeycloakKeySamlExtensionGenerator(<key ID>));
-        }
-
-        binding.relayState("logout");
-
-        try {
-            SamlUtil.sendSaml(true, facade, deployment.getIDP().getSingleLogoutService().getRequestBindingUrl(), binding, logoutBuilder.buildDocument(), deployment.getIDP().getSingleLogoutService().getRequestBinding());
-            sessionStore.setCurrentAction(SamlSessionStore.CurrentAction.LOGGING_OUT);
-        } catch (Exception e) {
-            log.error("Could not send global logout SAML request", e);
-            return AuthOutcome.FAILED;
-        }
-        return AuthOutcome.NOT_ATTEMPTED;
-    }
+    return AuthOutcome.NOT_ATTEMPTED;
+  }
 }
